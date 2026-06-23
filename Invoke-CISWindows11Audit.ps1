@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$ChecksPath = (Join-Path $PSScriptRoot 'cis_win11_v5.0.1_L1_checks.csv'),
-    [string]$OutputPath = (Join-Path $PSScriptRoot ("cis_win11_v5.0.1_L1_results_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss')))
+    [string]$OutputPath = ''
 )
 
 Set-StrictMode -Version Latest
@@ -9,6 +9,22 @@ $ErrorActionPreference = 'Stop'
 
 $script:SecurityPolicy = $null
 $script:AuditPolicy = $null
+
+if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+    $checksBaseName = [System.IO.Path]::GetFileNameWithoutExtension($ChecksPath)
+    $OutputPath = Join-Path $PSScriptRoot ("{0}_results_{1}.csv" -f $checksBaseName, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+}
+
+function Get-ObjectPropertyValue {
+    param(
+        $Object,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
 
 function ConvertTo-RegistryProviderPath {
     param([Parameter(Mandatory)][string]$Path)
@@ -42,6 +58,34 @@ function Expand-RegistryTargetPath {
         return @($hives | ForEach-Object { "HKU\$($_.PSChildName)\$suffix" })
     }
     return @($Path)
+}
+
+function Get-GuidRegistryCandidatePath {
+    param($Target)
+
+    $paths = New-Object System.Collections.Generic.List[string]
+    $guidRegKey = Get-ObjectPropertyValue -Object $Target -Name 'GuidRegKey'
+    if (-not [string]::IsNullOrWhiteSpace([string]$guidRegKey)) {
+        $paths.Add([string]$guidRegKey)
+    }
+
+    $targetPath = [string]$Target.Path
+    if ($targetPath -match '^(.*\\Providers)\\\{GUID\}\\(.+)$') {
+        $providersPath = ConvertTo-RegistryProviderPath $Matches[1]
+        try {
+            foreach ($provider in (Get-ChildItem -LiteralPath $providersPath -ErrorAction Stop)) {
+                $paths.Add($targetPath.Replace('{GUID}', $provider.PSChildName))
+            }
+        } catch {
+            if ($paths.Count -eq 0) {
+                $paths.Add($targetPath)
+            }
+        }
+    } else {
+        $paths.Add($targetPath)
+    }
+
+    return @($paths.ToArray() | Select-Object -Unique)
 }
 
 function Format-Value {
@@ -234,11 +278,11 @@ function Test-ScalarValue {
         }
         'Regex' {
             if ($null -eq $Actual) { return $false }
-            return ([string]$Actual -match $expectedText)
+            return ((Format-Value $Actual) -match $expectedText)
         }
         'NotRegex' {
             if ($null -eq $Actual) { return $true }
-            return -not ([string]$Actual -match $expectedText)
+            return -not ((Format-Value $Actual) -match $expectedText)
         }
         'NotEqual' {
             return -not (([string]$Actual).Trim() -ieq $expectedText)
@@ -356,6 +400,41 @@ function Test-PrincipalAlternatives {
     return $false
 }
 
+function Test-RegistryTargetValue {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        $Target
+    )
+
+    $providerPath = ConvertTo-RegistryProviderPath $Path
+    $actual = $null
+    $found = $true
+    try {
+        $actual = Get-ItemPropertyValue -LiteralPath $providerPath -Name $Target.Name -ErrorAction Stop
+    } catch {
+        $found = $false
+        $actual = $null
+    }
+
+    $actualPart = "{0}:{1}={2}" -f $Path, $Target.Name, (Format-Value $actual)
+    $regOption = [string](Get-ObjectPropertyValue -Object $Target -Name 'RegOption')
+    $operator = [string](Get-ObjectPropertyValue -Object $Target -Name 'Operator')
+
+    if ($regOption -eq 'MUST_NOT_EXIST' -or $operator -eq 'NotExists') {
+        return [pscustomobject]@{ Actual = $actualPart; Pass = (-not $found) }
+    }
+
+    if (-not $found) {
+        return [pscustomobject]@{ Actual = $actualPart; Pass = ($regOption -eq 'CAN_BE_NULL') }
+    }
+
+    $expected = [string](Get-ObjectPropertyValue -Object $Target -Name 'Expected')
+    $expectedDataValue = Get-ObjectPropertyValue -Object $Target -Name 'ExpectedData'
+    $expectedData = if ($null -ne $expectedDataValue) { [string]$expectedDataValue } else { '' }
+    $pass = Test-ScalarValue -Actual $actual -Operator $operator -Expected $expected -ExpectedData $expectedData
+    return [pscustomobject]@{ Actual = $actualPart; Pass = $pass }
+}
+
 function Test-RegistryCheck {
     param($Check)
     $targets = $Check.TargetsJson | ConvertFrom-Json
@@ -363,34 +442,28 @@ function Test-RegistryCheck {
     $allPass = $true
 
     foreach ($target in @($targets)) {
-        foreach ($expandedPath in (Expand-RegistryTargetPath $target.Path)) {
-            $providerPath = ConvertTo-RegistryProviderPath $expandedPath
-            $actual = $null
-            $found = $true
-            try {
-                $actual = Get-ItemPropertyValue -LiteralPath $providerPath -Name $target.Name -ErrorAction Stop
-            } catch {
-                $found = $false
-                $actual = $null
-            }
+        $guidRegKey = Get-ObjectPropertyValue -Object $target -Name 'GuidRegKey'
+        $isGuidRegistry = (([string]$target.Path) -match '\\\{GUID\}\\') -or (-not [string]::IsNullOrWhiteSpace([string]$guidRegKey))
 
-            $actualParts.Add(("{0}:{1}={2}" -f $expandedPath, $target.Name, (Format-Value $actual)))
-
-            if ($target.RegOption -eq 'MUST_NOT_EXIST' -or $target.Operator -eq 'NotExists') {
-                if ($found) { $allPass = $false }
-                continue
-            }
-
-            if (-not $found) {
-                if ($target.RegOption -eq 'CAN_BE_NULL') {
-                    continue
+        if ($isGuidRegistry) {
+            $candidateResults = New-Object System.Collections.Generic.List[object]
+            foreach ($candidatePath in (Get-GuidRegistryCandidatePath $target)) {
+                foreach ($expandedPath in (Expand-RegistryTargetPath $candidatePath)) {
+                    $result = Test-RegistryTargetValue -Path $expandedPath -Target $target
+                    $candidateResults.Add($result)
+                    $actualParts.Add($result.Actual)
                 }
-                $allPass = $false
-                continue
             }
+            if ($candidateResults.Count -eq 0 -or -not ($candidateResults | Where-Object { $_.Pass })) {
+                $allPass = $false
+            }
+            continue
+        }
 
-            $expectedData = if ($null -ne $target.ExpectedData) { [string]$target.ExpectedData } else { '' }
-            if (-not (Test-ScalarValue -Actual $actual -Operator $target.Operator -Expected $target.Expected -ExpectedData $expectedData)) {
+        foreach ($expandedPath in (Expand-RegistryTargetPath $target.Path)) {
+            $result = Test-RegistryTargetValue -Path $expandedPath -Target $target
+            $actualParts.Add($result.Actual)
+            if (-not $result.Pass) {
                 $allPass = $false
             }
         }
@@ -502,6 +575,25 @@ function Test-LocalAccountCheck {
     return [pscustomobject]@{ Actual = $account.Name; Pass = $pass }
 }
 
+function Test-PowerShellCheck {
+    param($Check)
+
+    $scriptBlock = [scriptblock]::Create($Check.Target)
+    $output = & $scriptBlock 6>&1 5>&1 4>&1 3>&1 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.InformationRecord]) {
+            [string]$_.MessageData
+        } else {
+            [string]$_
+        }
+    }
+    $actual = (($output | Where-Object { $null -ne $_ }) -join "`n").Trim()
+    if ([string]::IsNullOrWhiteSpace($actual)) {
+        $actual = '<no output>'
+    }
+    $pass = Test-ScalarValue -Actual $actual -Operator $Check.Operator -Expected $Check.Expected -ExpectedData $Check.ExpectedData
+    return [pscustomobject]@{ Actual = $actual; Pass = $pass }
+}
+
 function Invoke-CISCheck {
     param($Check)
     switch ($Check.Method) {
@@ -512,9 +604,11 @@ function Invoke-CISCheck {
         'Service' { return Test-ServiceCheck $Check }
         'Firewall' { return Test-FirewallCheck $Check }
         'LocalAccount' { return Test-LocalAccountCheck $Check }
+        'PowerShell' { return Test-PowerShellCheck $Check }
         default {
+            $manualReason = [string](Get-ObjectPropertyValue -Object $Check -Name 'ManualReason')
             return [pscustomobject]@{
-                Actual = if ([string]::IsNullOrWhiteSpace($Check.ManualReason)) { 'Manual review required' } else { $Check.ManualReason }
+                Actual = if ([string]::IsNullOrWhiteSpace($manualReason)) { 'Manual review required' } else { $manualReason }
                 Pass = $null
             }
         }
@@ -528,11 +622,12 @@ if (-not (Test-Path -LiteralPath $ChecksPath)) {
 $checks = Import-Csv -LiteralPath $ChecksPath
 $results = foreach ($check in $checks) {
     $checkName = "{0} {1}" -f $check.Id, $check.Title
+    $manualReason = [string](Get-ObjectPropertyValue -Object $check -Name 'ManualReason')
 
     if ($check.Method -eq 'Manual') {
         [pscustomobject]@{
             'CHECK' = $checkName
-            'Actual Value' = if ([string]::IsNullOrWhiteSpace($check.ManualReason)) { 'Manual review required' } else { $check.ManualReason }
+            'Actual Value' = if ([string]::IsNullOrWhiteSpace($manualReason)) { 'Manual review required' } else { $manualReason }
             'Expected Value' = $check.Expected
             'Pass/Fail/Manual' = 'Manual'
         }
@@ -559,4 +654,4 @@ $results = foreach ($check in $checks) {
 }
 
 $results | Export-Csv -LiteralPath $OutputPath -NoTypeInformation -Encoding UTF8
-Write-Host "Wrote CIS Windows 11 audit results to: $OutputPath"
+Write-Host "Wrote CIS audit results to: $OutputPath"

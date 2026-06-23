@@ -46,10 +46,50 @@ function ConvertTo-Number {
     param($Value)
     if ($null -eq $Value) { return $null }
     $text = ([string]$Value).Trim()
-    if ($text -match '^0x[0-9a-fA-F]+$') { return [Convert]::ToInt64($text, 16) }
+    $lower = $text.ToLowerInvariant()
+    switch ($lower) {
+        'enabled' { return 1 }
+        'enable' { return 1 }
+        'yes' { return 1 }
+        'on' { return 1 }
+        'true' { return 1 }
+        'disabled' { return 0 }
+        'disable' { return 0 }
+        'no' { return 0 }
+        'off' { return 0 }
+        'false' { return 0 }
+    }
+    $normalized = $text -replace ',', ''
+    if ($normalized -match '^0x[0-9a-fA-F]+$') { return [Convert]::ToInt64($normalized, 16) }
     $number = 0L
-    if ([Int64]::TryParse($text, [ref]$number)) { return $number }
+    if ([Int64]::TryParse($normalized, [ref]$number)) { return $number }
+    if ($normalized -match '(0x[0-9a-fA-F]+|\d+)') {
+        $matchText = $Matches[1]
+        if ($matchText -match '^0x') { return [Convert]::ToInt64($matchText, 16) }
+        return [Convert]::ToInt64($matchText)
+    }
     return $null
+}
+
+function ConvertTo-BooleanText {
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    $text = ([string]$Value).Trim().ToLowerInvariant()
+    switch ($text) {
+        'enabled' { return 'true' }
+        'enable' { return 'true' }
+        'yes' { return 'true' }
+        'on' { return 'true' }
+        'true' { return 'true' }
+        '1' { return 'true' }
+        'disabled' { return 'false' }
+        'disable' { return 'false' }
+        'no' { return 'false' }
+        'off' { return 'false' }
+        'false' { return 'false' }
+        '0' { return 'false' }
+        default { return $null }
+    }
 }
 
 function Test-ScalarValue {
@@ -104,6 +144,11 @@ function Test-ScalarValue {
             return ($null -eq $Actual)
         }
         default {
+            $actualBool = ConvertTo-BooleanText $Actual
+            $expectedBool = ConvertTo-BooleanText $expectedText
+            if ($null -ne $actualBool -and $null -ne $expectedBool) {
+                return ($actualBool -eq $expectedBool)
+            }
             return (([string]$Actual).Trim() -ieq $expectedText)
         }
     }

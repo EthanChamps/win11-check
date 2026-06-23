@@ -1,7 +1,0 @@
-Id,Title,AssessmentStatus,Expected,ManualReason
-1.2.3,Ensure 'Allow Administrator account lockout' is set to 'Enabled',Manual,Enabled,CIS marks this recommendation as Manual.
-2.3.7.4,Configure 'Interactive logon: Message text for users attempting to log on',Automated,Configure 'Interactive logon: Message text for users attempting to log on',Organization-defined text must be reviewed
-2.3.7.5,Configure 'Interactive logon: Message title for users attempting to log on',Automated,Configure 'Interactive logon: Message title for users attempting to log on',Organization-defined text must be reviewed
-2.3.11.5,Ensure 'Network security: Force logoff when logon hours expire' is set to 'Enabled',Manual,Enabled,CIS marks this recommendation as Manual.
-18.10.10.1.1,Ensure 'Allow access to BitLocker-protected fixed data drives from earlier versions of Windows' is set to 'Disabled',Automated,'Allow access to BitLocker-protected fixed data drives from earlier versions of Windows' is set to 'Disabled',No reliable local audit method was generated from the benchmark text; consultant must verify manually.
-18.10.42.4.1,Ensure 'Enable EDR in block mode' is set to 'Enabled',Automated,'Enable EDR in block mode' is set to 'Enabled',No reliable local audit method was generated from the benchmark text; consultant must verify manually.

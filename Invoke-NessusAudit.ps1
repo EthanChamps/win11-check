@@ -666,12 +666,56 @@ function Normalize-Principal {
     return $name.ToUpperInvariant()
 }
 
+function Invoke-NativeCommandCapture {
+    # Run a native helper (auditpol.exe, secedit.exe) and capture its exit code and
+    # combined stdout/stderr WITHOUT letting a non-zero exit turn into a thrown
+    # exception. On PowerShell 7.4+ $PSNativeCommandUseErrorActionPreference defaults
+    # to $true, which - combined with the script's $ErrorActionPreference='Stop' -
+    # would otherwise surface a bare 'Error 0x........ occurred:' against every check
+    # that depends on the tool. We shadow both preferences locally so the caller can
+    # inspect the result and emit a clear, single diagnostic instead.
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+
+    $PSNativeCommandUseErrorActionPreference = $false
+    $ErrorActionPreference = 'Continue'
+    $global:LASTEXITCODE = 0
+
+    try {
+        $output = & $FilePath @Arguments 2>&1 | ForEach-Object { [string]$_ }
+        $exitCode = $LASTEXITCODE
+    } catch {
+        # Command not found / failed to launch (e.g. tool not on PATH). Surface it as a
+        # captured failure rather than letting it abort the check with a raw exception.
+        $output = @([string]$_.Exception.Message)
+        $exitCode = if ($LASTEXITCODE) { $LASTEXITCODE } else { -1 }
+    }
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Output   = @($output)
+    }
+}
+
+function Get-FirstNonEmptyLine {
+    param([string[]]$Lines)
+    $line = @($Lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
+    if ($line.Count -eq 0) { return '<no output>' }
+    return [string]$line[0]
+}
+
 function Get-SecurityPolicy {
     if ($null -ne $script:SecurityPolicy) { return $script:SecurityPolicy }
 
-    $tempFile = Join-Path $env:TEMP ("cis-secpol-{0}.inf" -f ([guid]::NewGuid()))
+    # [System.IO.Path]::GetTempPath() always returns a value (unlike $env:TEMP, which
+    # can be null in some shells / non-Windows hosts).
+    $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ("cis-secpol-{0}.inf" -f ([guid]::NewGuid()))
     try {
-        $null = & secedit.exe /export /cfg $tempFile 2>$null
+        $capture = Invoke-NativeCommandCapture -FilePath 'secedit.exe' -Arguments @('/export', '/cfg', $tempFile)
+        if (-not (Test-Path -LiteralPath $tempFile)) {
+            throw ("Local security policy could not be exported. secedit.exe /export failed (exit code 0x{0:X8}): {1}. Run this script from an elevated PowerShell prompt on the target host." -f $capture.ExitCode, (Get-FirstNonEmptyLine $capture.Output))
+        }
         $policy = @{}
         foreach ($line in Get-Content -LiteralPath $tempFile -Encoding Unicode) {
             if ($line -match '^\s*([^=]+?)\s*=\s*(.*?)\s*$') {
@@ -687,14 +731,34 @@ function Get-SecurityPolicy {
 
 function Get-AuditPolicy {
     if ($null -ne $script:AuditPolicy) { return $script:AuditPolicy }
-    $rows = & auditpol.exe /get /subcategory:* /r 2>$null | ConvertFrom-Csv
+
+    # auditpol.exe /get /subcategory:* /r returns "Error 0x00000057 occurred:" on some
+    # hosts/locales. Fall back to /category:* (which also enumerates every subcategory)
+    # before giving up, and surface a clear diagnostic rather than the raw Win32 error.
+    $rows = $null
+    $diag = ''
+    foreach ($scope in @('/subcategory:*', '/category:*')) {
+        $capture = Invoke-NativeCommandCapture -FilePath 'auditpol.exe' -Arguments @('/get', $scope, '/r')
+        $text = ($capture.Output -join "`n")
+        $looksValid = ($capture.ExitCode -eq 0) -and ($text -match 'Subcategory') -and ($text -notmatch 'Error 0x[0-9A-Fa-f]{8} occurred')
+        if ($looksValid) {
+            $rows = $capture.Output | ConvertFrom-Csv
+            break
+        }
+        $diag = "auditpol.exe /get $scope /r failed (exit code 0x{0:X8}): {1}" -f $capture.ExitCode, (Get-FirstNonEmptyLine $capture.Output)
+    }
+
+    if ($null -eq $rows) {
+        throw "Advanced Audit Policy could not be read. $diag. Run 'auditpol /get /category:*' from an elevated PowerShell prompt on the target host to see the underlying error."
+    }
+
     $map = @{}
     foreach ($row in $rows) {
-        $guid = $row.'Subcategory GUID'
+        $guid = [string](Get-ObjectPropertyValue -Object $row -Name 'Subcategory GUID')
         if (-not [string]::IsNullOrWhiteSpace($guid)) {
             $map[$guid.Trim('{}').ToLowerInvariant()] = $row
         }
-        $subcategory = $row.Subcategory
+        $subcategory = [string](Get-ObjectPropertyValue -Object $row -Name 'Subcategory')
         if (-not [string]::IsNullOrWhiteSpace($subcategory)) {
             $map[$subcategory.Trim().ToLowerInvariant()] = $row
         }

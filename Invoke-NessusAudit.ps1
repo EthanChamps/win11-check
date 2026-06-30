@@ -322,6 +322,59 @@ function Convert-AuditFieldsToCheck {
     return New-AuditCheckRow -Id $id -Title $title -Method 'Manual' -Expected 'Manual review required' -ValueType $valueType -SourceType $sourceType -RegOption $regOption -CheckType $checkType -ManualReason "Unsupported Nessus audit item type for this local runner: $sourceType"
 }
 
+function Read-AuditCustomItemFields {
+    # Read a <custom_item> body starting at the line after the opening tag and return
+    # both the parsed field hashtable and the index of the closing </custom_item> line.
+    param(
+        [string[]]$Lines,
+        [int]$Start
+    )
+    $fields = @{}
+    $j = $Start
+    while ($j -lt $Lines.Count -and $Lines[$j].Trim() -ne '</custom_item>') {
+        if ($Lines[$j] -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s+:\s*(.*?)\s*$') {
+            $key = $Matches[1]
+            $value = $Matches[2]
+            if ($key -eq 'value_data') {
+                $fields[$key] = $value.Trim()
+            } else {
+                $fields[$key] = Unquote-AuditValue $value
+            }
+        }
+        $j++
+    }
+    return [pscustomobject]@{ Fields = $fields; EndIndex = $j }
+}
+
+function New-CombinedConditionCheck {
+    # A numbered <report> whose test logic lives in the preceding <condition> (an
+    # "<if> recommendation"). Combine the condition's registry items into one check
+    # titled by the report's CIS number, instead of leaving each condition item as an
+    # unnamed 'audit-####' row.
+    param(
+        $ReportParts,
+        [System.Collections.Generic.List[object]]$ConditionItems,
+        [hashtable]$Variables,
+        [int]$Index
+    )
+
+    $targets = New-Object System.Collections.Generic.List[object]
+    $expectedParts = New-Object System.Collections.Generic.List[string]
+    foreach ($fields in $ConditionItems) {
+        $sub = Convert-AuditFieldsToCheck -Fields $fields -Variables $Variables -Index $Index
+        if ($sub.Method -ne 'Registry') { return $null }   # caller falls back to per-item rows
+        foreach ($t in @($sub.TargetsJson | ConvertFrom-Json)) {
+            $targets.Add($t)
+            $expectedParts.Add(('{0} {1} {2}' -f $t.Name, $t.Operator, $t.Expected).Trim())
+        }
+    }
+    if ($targets.Count -eq 0) { return $null }
+
+    return New-AuditCheckRow -Id $ReportParts.Id -Title $ReportParts.Title -Method 'Registry' `
+        -Target $ReportParts.Title -Operator 'AllMatch' -Expected (($expectedParts.ToArray()) -join ' AND ') `
+        -TargetsJson (ConvertTo-CsvSafeJson @($targets.ToArray())) -SourceType 'IF_CONDITION'
+}
+
 function ConvertFrom-NessusAuditFile {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -331,31 +384,95 @@ function ConvertFrom-NessusAuditFile {
 
     $text = Get-Content -LiteralPath $Path -Raw
     $variables = Read-AuditVariables $text
+    $lines = $text -split "`r?`n"
     $rows = New-Object System.Collections.Generic.List[object]
     $index = 0
 
-    foreach ($match in [regex]::Matches($text, '<custom_item>\s*(.*?)\s*</custom_item>', 'Singleline')) {
-        $block = $match.Groups[1].Value
-        $fields = @{}
-        foreach ($line in ($block -split "`r?`n")) {
-            if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s+:\s*(.*?)\s*$') {
-                $key = $Matches[1]
-                $value = $Matches[2]
-                if ($key -eq 'value_data') {
-                    $fields[$key] = $value.Trim()
-                } else {
-                    $fields[$key] = Unquote-AuditValue $value
+    # Structure-aware walk. Nessus expresses some recommendations as
+    # <if><condition>...test items...</condition><then><report>NUMBER</report></then>.
+    # The condition items carry no CIS number on their own, so we must title them from
+    # the report. Items that sit inside a condition with NO numbered report are pure
+    # gates (OS / role detection) and are skipped. Everything else parses as before.
+    $stack = New-Object System.Collections.Generic.List[object]
+    $i = 0
+    while ($i -lt $lines.Count) {
+        $t = $lines[$i].Trim()
+
+        if ($t -eq '<if>') {
+            $stack.Add([pscustomobject]@{
+                ConditionItems     = (New-Object System.Collections.Generic.List[object])
+                CollectingCondition = $false
+                Emitted            = $false
+            })
+            $i++; continue
+        }
+        if ($t -eq '</if>') {
+            if ($stack.Count -gt 0) { $stack.RemoveAt($stack.Count - 1) }
+            $i++; continue
+        }
+
+        $cur = if ($stack.Count -gt 0) { $stack[$stack.Count - 1] } else { $null }
+
+        if ($t -match '^<condition') {
+            if ($cur) { $cur.CollectingCondition = $true }
+            $i++; continue
+        }
+        if ($t -eq '</condition>') {
+            if ($cur) { $cur.CollectingCondition = $false }
+            $i++; continue
+        }
+
+        if ($t -match '^<report') {
+            $desc = ''
+            $j = $i + 1
+            while ($j -lt $lines.Count -and $lines[$j].Trim() -ne '</report>') {
+                if ($desc -eq '' -and $lines[$j] -match '^\s*description\s*:\s*(.*?)\s*$') {
+                    $desc = $Matches[1]
+                }
+                $j++
+            }
+            if ($cur -and -not $cur.Emitted -and $desc -ne '') {
+                $parts = Get-AuditDescriptionParts $desc
+                if (-not [string]::IsNullOrWhiteSpace($parts.Id)) {
+                    $index++
+                    $combined = New-CombinedConditionCheck -ReportParts $parts -ConditionItems $cur.ConditionItems -Variables $variables -Index $index
+                    if ($null -ne $combined) {
+                        $rows.Add($combined)
+                    } else {
+                        foreach ($f in $cur.ConditionItems) {
+                            $index++
+                            $rows.Add((Convert-AuditFieldsToCheck -Fields $f -Variables $variables -Index $index))
+                        }
+                    }
+                    $cur.Emitted = $true
                 }
             }
+            $i = $j + 1; continue
         }
-        if (-not $fields.ContainsKey('type') -or -not $fields.ContainsKey('description')) {
+
+        if ($t -eq '<custom_item>') {
+            $parsed = Read-AuditCustomItemFields -Lines $lines -Start ($i + 1)
+            $fields = $parsed.Fields
+            $i = $parsed.EndIndex + 1
+
+            if (-not $fields.ContainsKey('type') -or -not $fields.ContainsKey('description')) { continue }
+
+            # Inside an open condition -> gating/test item; collect it for the enclosing
+            # <if> rather than emitting a standalone (unnamed) row.
+            if ($cur -and $cur.CollectingCondition) {
+                $cur.ConditionItems.Add($fields)
+                continue
+            }
+
+            if ((Get-AuditField -Fields $fields -Name 'description') -match '^(Windows \d+ is installed|Windows \d+ installation type|Target is enrolled)') {
+                continue
+            }
+            $index++
+            $rows.Add((Convert-AuditFieldsToCheck -Fields $fields -Variables $variables -Index $index))
             continue
         }
-        if ((Get-AuditField -Fields $fields -Name 'description') -match '^(Windows \d+ is installed|Windows \d+ installation type|Target is enrolled)') {
-            continue
-        }
-        $index++
-        $rows.Add((Convert-AuditFieldsToCheck -Fields $fields -Variables $variables -Index $index))
+
+        $i++
     }
 
     return @($rows.ToArray())

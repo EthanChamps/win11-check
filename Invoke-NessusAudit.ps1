@@ -135,7 +135,10 @@ function Split-AuditOrExpression {
         if ($items.Count -eq 0) { $items.Add('') }
         $alternatives.Add([string[]]$items.ToArray())
     }
-    return @($alternatives.ToArray())
+    # Preserve each alternative as its own string array. Without the unary comma,
+    # PowerShell can unwrap the nested arrays and serialize the whole OR expression
+    # as one encoded value.
+    return ,$alternatives.ToArray()
 }
 
 function Get-AuditDescriptionParts {
@@ -623,15 +626,30 @@ function ConvertFrom-EncodedAlternatives {
     foreach ($altText in ($Encoded -split ';')) {
         if ([string]::IsNullOrWhiteSpace($altText)) { continue }
         $items = New-Object System.Collections.Generic.List[string]
+        $legacyAlternatives = $null
         foreach ($itemText in ($altText -split ',')) {
             if ($itemText -eq '~') {
                 $items.Add('')
                 continue
             }
             if ([string]::IsNullOrWhiteSpace($itemText)) { continue }
-            $items.Add([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($itemText)))
+            $decoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($itemText))
+            # Older exported catalogs encoded an entire OR expression as one item.
+            # Read those catalogs safely while new exports use separate alternatives.
+            if ($decoded -match '\s+\|\|\s+') {
+                $legacyAlternatives = @(Split-AuditOrExpression $decoded)
+                break
+            } else {
+                $items.Add($decoded)
+            }
         }
-        $alternatives.Add([pscustomobject]@{ Items = [string[]]$items.ToArray() })
+        if ($null -ne $legacyAlternatives) {
+            foreach ($alternative in $legacyAlternatives) {
+                $alternatives.Add([pscustomobject]@{ Items = [string[]]@($alternative) })
+            }
+        } else {
+            $alternatives.Add([pscustomobject]@{ Items = [string[]]$items.ToArray() })
+        }
     }
 
     return @($alternatives.ToArray())

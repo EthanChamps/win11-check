@@ -63,7 +63,7 @@ Embedded shell commands are not executed by default. If the audit file is truste
 
 The tools parse any Nessus `.audit` file, but only locally runnable item types are evaluated automatically.
 
-Supported Windows mappings include registry checks, GUID PolicyManager registry checks, password and lockout policy, user rights, audit policy subcategories, built-in account checks, banner checks, and opt-in embedded PowerShell checks.
+Supported Windows mappings include registry checks, GUID PolicyManager registry checks, password and lockout policy, user rights, audit policy subcategories, service policies, built-in account checks, banner checks, and opt-in embedded PowerShell checks.
 
 Supported Linux/Unix mappings include common file existence/content checks, package checks, process checks, service checks, and opt-in command checks.
 

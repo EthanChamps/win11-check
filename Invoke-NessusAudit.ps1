@@ -314,6 +314,22 @@ function Convert-AuditFieldsToCheck {
         return New-AuditCheckRow -Id $id -Title $title -Method 'LocalAccount' -Target (Get-AuditField -Fields $Fields -Name 'account_type') -Operator $op.Operator -Expected $op.Expected -ExpectedData $op.ExpectedData -ValueType $valueType -SourceType $sourceType -RegOption $regOption -CheckType $checkType
     }
 
+    if ($sourceType -eq 'SERVICE_POLICY') {
+        $serviceName = Get-AuditField -Fields $Fields -Name 'service_name'
+        if ([string]::IsNullOrWhiteSpace($serviceName)) {
+            $serviceName = Get-AuditField -Fields $Fields -Name 'service'
+        }
+        if ([string]::IsNullOrWhiteSpace($serviceName)) {
+            return New-AuditCheckRow -Id $id -Title $title -Method 'Manual' -Expected 'Manual review required' -ValueType $valueType -SourceType $sourceType -RegOption $regOption -CheckType $checkType -ManualReason 'SERVICE_POLICY is missing service_name.'
+        }
+
+        $op = ConvertTo-AuditOperator -ValueData $valueData -CheckType $checkType -RegOption $regOption
+        if ((Unquote-AuditValue $valueData) -ieq 'Disabled') {
+            $op = [pscustomobject]@{ Operator = 'DisabledOrNotInstalled'; Expected = 'Disabled'; ExpectedData = '' }
+        }
+        return New-AuditCheckRow -Id $id -Title $title -Method 'Service' -Target $serviceName -Operator $op.Operator -Expected $op.Expected -ExpectedData $op.ExpectedData -ValueType $valueType -SourceType $sourceType -RegOption $regOption -CheckType $checkType
+    }
+
     if ($sourceType -eq 'AUDIT_POWERSHELL') {
         $op = ConvertTo-AuditOperator -ValueData $valueData -CheckType $checkType -RegOption $regOption
         return New-AuditCheckRow -Id $id -Title $title -Method 'PowerShell' -Target (Get-AuditField -Fields $Fields -Name 'powershell_args') -Operator $op.Operator -Expected $op.Expected -ExpectedData $op.ExpectedData -ValueType $valueType -SourceType $sourceType -RegOption $regOption -CheckType $checkType
@@ -493,8 +509,9 @@ function Expand-RegistryTargetPath {
     param([Parameter(Mandatory)][string]$Path)
     if ($Path -match '^HKU\\\[USER SID\]\\(.+)$') {
         $suffix = $Matches[1]
-        $hives = Get-ChildItem -LiteralPath 'Registry::HKEY_USERS' -ErrorAction Stop |
+        $hives = @(Get-ChildItem -LiteralPath 'Registry::HKEY_USERS' -ErrorAction Stop |
             Where-Object { $_.PSChildName -match '^S-1-5-21-' -and $_.PSChildName -notmatch '_Classes$' }
+        )
         if ($hives.Count -eq 0) {
             throw 'No loaded HKEY_USERS user SID hives were available for HKU\[USER SID] policy checks.'
         }
@@ -502,8 +519,9 @@ function Expand-RegistryTargetPath {
     }
     if ($Path -match '^HKU\\(.+)$' -and $Matches[1] -notmatch '^S-\d-\d+') {
         $suffix = $Matches[1]
-        $hives = Get-ChildItem -LiteralPath 'Registry::HKEY_USERS' -ErrorAction Stop |
+        $hives = @(Get-ChildItem -LiteralPath 'Registry::HKEY_USERS' -ErrorAction Stop |
             Where-Object { $_.PSChildName -match '^S-1-5-21-' -and $_.PSChildName -notmatch '_Classes$' }
+        )
         if ($hives.Count -eq 0) {
             throw 'No loaded HKEY_USERS user SID hives were available for HKU user policy checks.'
         }

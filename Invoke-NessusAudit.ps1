@@ -299,11 +299,20 @@ function Convert-AuditFieldsToCheck {
     }
 
     if ($sourceType -eq 'AUDIT_POLICY_SUBCATEGORY') {
-        $tokens = @((Unquote-AuditValue $valueData) -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         $alternatives = New-Object System.Collections.Generic.List[object]
-        $alternatives.Add([string[]]$tokens)
-        if ($tokens.Count -eq 1 -and $title -match '\binclude\b') {
-            $alternatives.Add([string[]]@('Success', 'Failure'))
+        foreach ($alternative in (Split-AuditOrExpression $valueData)) {
+            $alternatives.Add([string[]]@($alternative))
+        }
+
+        if ($alternatives.Count -eq 1 -and $title -match '\binclude\b') {
+            $requiredTokens = @()
+            foreach ($item in $alternatives[0]) {
+                $requiredTokens += ConvertTo-AuditSettingTokens $item
+            }
+            $requiredTokens = @($requiredTokens | Select-Object -Unique)
+            if ($requiredTokens.Count -eq 1) {
+                $alternatives.Add([string[]]@('Success', 'Failure'))
+            }
         }
         $display = (($alternatives.ToArray() | ForEach-Object { (@($_) -join ' and ') }) -join ' OR ')
         return New-AuditCheckRow -Id $id -Title $title -Method 'AuditPolicy' -Target (Get-AuditField -Fields $Fields -Name 'audit_policy_subcategory') -Operator 'ExactAlternatives' -Expected $display -ExpectedData (ConvertTo-EncodedAlternatives ($alternatives.ToArray())) -ValueType $valueType -SourceType $sourceType -RegOption $regOption -CheckType $checkType
@@ -637,7 +646,7 @@ function ConvertFrom-EncodedAlternatives {
             # Older exported catalogs encoded an entire OR expression as one item.
             # Read those catalogs safely while new exports use separate alternatives.
             if ($decoded -match '\s+\|\|\s+') {
-                $legacyAlternatives = @(Split-AuditOrExpression $decoded)
+                $legacyAlternatives = Split-AuditOrExpression $decoded
                 break
             } else {
                 $items.Add($decoded)
@@ -816,6 +825,8 @@ function Normalize-Principal {
 
     $name = $name -replace '^BUILTIN\\', ''
     $name = $name -replace '^NT AUTHORITY\\', ''
+    $name = $name -replace '^NT SERVICE\\', ''
+    $name = $name -replace '^RESTRICTED SERVICES\\', ''
     return $name.ToUpperInvariant()
 }
 

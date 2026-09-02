@@ -1,0 +1,6 @@
+# Nessus audit inputs and exported catalogs/results stay outside this tools repo.
+*.audit
+*.aduit
+*.nessus
+*_checks.csv
+*_results_*.csv

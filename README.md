@@ -20,11 +20,10 @@ Export the parsed checks as a reusable CSV catalog:
 .\Invoke-NessusAudit.ps1 -AuditPath .\benchmark.audit -ExportChecksPath .\benchmark_checks.csv
 ```
 
-Run a prebuilt CSV catalog:
+Run a checks catalog CSV supplied by the user:
 
 ```powershell
-.\Invoke-NessusAudit.ps1 -ChecksPath .\cis_win11_v5.0.1_L1_checks.csv
-.\Invoke-NessusAudit.ps1 -ChecksPath .\cis_intune_windows11_v4.0.0_L1_checks.csv
+.\Invoke-NessusAudit.ps1 -ChecksPath C:\path\to\checks.csv
 ```
 
 Embedded PowerShell in `.audit` files is not executed by default. If the audit file is trusted:
@@ -33,10 +32,10 @@ Embedded PowerShell in `.audit` files is not executed by default. If the audit f
 .\Invoke-NessusAudit.ps1 -AuditPath .\benchmark.audit -AllowEmbeddedScripts
 ```
 
-The old CIS-specific entrypoint still works:
+The old CIS-specific entrypoint still works when given an audit or checks file:
 
 ```powershell
-.\Invoke-CISWindows11Audit.ps1
+.\Invoke-CISWindows11Audit.ps1 -AuditPath .\benchmark.audit
 ```
 
 ## Linux / Unix Shell

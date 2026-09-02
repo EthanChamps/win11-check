@@ -1186,7 +1186,7 @@ function Invoke-NessusCheck {
 }
 
 if ([string]::IsNullOrWhiteSpace($AuditPath) -and [string]::IsNullOrWhiteSpace($ChecksPath)) {
-    $ChecksPath = Join-Path $PSScriptRoot 'cis_win11_v5.0.1_L1_checks.csv'
+    throw 'Specify either -AuditPath for a Nessus .audit file or -ChecksPath for a checks catalog CSV.'
 }
 
 if (-not [string]::IsNullOrWhiteSpace($AuditPath)) {
